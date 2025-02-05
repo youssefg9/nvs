@@ -14,7 +14,7 @@ SRS grid and supplementary information.
 import numpy as np
 from sionna import nr
 from .config import Config
-from .utils import generate_prng_seq  # ensure this helper function is available
+from .utils import generate_prng_seq  # make sure this helper function is available
 
 __all__ = ["SRSConfig"]
 
@@ -29,10 +29,10 @@ class SRSConfig(Config):
       - cyclic_shift_hopping_id, cyclic_shift_hopping_subset, hopping_finer_granularity,
       - enable_eight_port_tdm.
 
-    The class computes additional parameters such as the group and sequence
-    numbers, cyclic shift (alpha), and returns an SRS grid array of shape
+    The class computes additional parameters (e.g. group/sequence numbers,
+    cyclic shift “alpha”) and returns an SRS grid of shape
       [num_srs_ports, num_subcarriers, num_symbols_per_slot].
-    It also stores an info dictionary (keys: "SeqGroup", "NSeq", "Alpha", "SeqLength").
+    An info dictionary is stored with keys "SeqGroup", "NSeq", "Alpha", and "SeqLength".
     """
 
     def __init__(self, carrier_config=None, **kwargs):
@@ -40,15 +40,15 @@ class SRSConfig(Config):
         self._name = "SRS Configuration"
         self.carrier = carrier_config
 
-        # Set default values (or use user-supplied ones via kwargs)
+        # Set default values (or use user-supplied ones)
         self._ifndef("num_srs_ports", 1)
         self._ifndef("symbol_start", 0)
         self._ifndef("num_srs_symbols", 1)
-        self._ifndef("srs_period", "on")  # alternatively, a tuple [T_srs, offset]
+        self._ifndef("srs_period", "on")  # or [T_srs, offset]
         self._ifndef("c_srs", 0)
         self._ifndef("b_srs", 0)
         self._ifndef("k_tc", 2)
-        self._ifndef("group_seq_hopping", "neither")  # options: 'neither', 'groupHopping', 'sequenceHopping'
+        self._ifndef("group_seq_hopping", "neither")  # 'neither','groupHopping','sequenceHopping'
         self._ifndef("n_srs_id", 0)
         self._ifndef("frequency_scaling_factor", 1)
         self._ifndef("cyclic_shift", 0)
@@ -61,7 +61,6 @@ class SRSConfig(Config):
         self.check_config()
 
     # --- Configurable Properties ---
-
     @property
     def carrier(self):
         return self._carrier
@@ -201,7 +200,6 @@ class SRSConfig(Config):
         self._enable_eight_port_tdm = value
 
     # --- Derived / Read-only Properties ---
-
     @property
     def is_candidate_slot(self):
         slot = self.carrier.slot_number

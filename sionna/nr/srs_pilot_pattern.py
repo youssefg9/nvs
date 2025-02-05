@@ -28,7 +28,7 @@ class SRSPilotPattern(PilotPattern):
         Datatype for internal calculations and output (default: tf.complex64).
     """
     def __init__(self, srs_configs, dtype=tf.complex64):
-        # Convert a single SRSConfig to a list.
+        # Convert single SRSConfig to a list.
         if isinstance(srs_configs, SRSConfig):
             srs_configs = [srs_configs]
         else:
@@ -43,23 +43,29 @@ class SRSPilotPattern(PilotPattern):
             assert (cfg.carrier.n_size_grid * 12) == num_sc, f"SRS config {i} has a different subcarrier dimension."
         max_ports = max(cfg.num_srs_ports for cfg in srs_configs)
 
-        # Allocate a uniform pilot mask of shape [num_tx, max_ports, num_sym, num_sc]
+        # Allocate a uniform pilot mask: shape [num_tx, max_ports, num_sym, num_sc]
         mask_all = np.zeros((num_tx, max_ports, num_sym, num_sc), dtype=bool)
         pilot_values = [[None] * max_ports for _ in range(num_tx)]
 
         for tx in range(num_tx):
             cfg = srs_configs[tx]
-            srs_mask = cfg.srs_mask().T  # shape: [num_sym, num_sc]
-            srs_grid = cfg.srs_grid  # expected shape: [num_srs_ports, num_sc, num_sym]
-            # Patch: if srs_grid is 2D, add a port dimension.
+            # Get the SRS mask (expected shape: [num_sc, num_sym]) and transpose to [num_sym, num_sc]
+            srs_mask = cfg.srs_mask().T
+            # Get the SRS grid from the config.
+            # (Expected shape: [num_srs_ports, num_sc, num_sym])
+            srs_grid = cfg.srs_grid
+            # --- Patch: ensure srs_grid is 3D with first axis = num_srs_ports ---
             if srs_grid.ndim == 2:
-                srs_grid = srs_grid[np.newaxis, ...]
-            srs_grid = np.atleast_3d(srs_grid)
-            if srs_grid.shape[0] != cfg.num_srs_ports:
-                srs_grid = np.tile(srs_grid, (cfg.num_srs_ports, 1, 1))
-            if srs_grid.shape[1] != num_sc or srs_grid.shape[2] != num_sym:
-                raise ValueError(f"SRSConfig {tx}: srs_grid shape {srs_grid.shape} does not match expected [{cfg.num_srs_ports}, {num_sc}, {num_sym}].")
-            # Transpose srs_grid to [num_sym, num_sc, num_srs_ports]
+                # Assume shape is (num_sc, num_sym); tile it along a new axis.
+                srs_grid = np.tile(srs_grid[np.newaxis, :, :], (cfg.num_srs_ports, 1, 1))
+            elif srs_grid.ndim == 3:
+                if srs_grid.shape[0] != cfg.num_srs_ports:
+                    srs_grid = np.tile(srs_grid, (cfg.num_srs_ports, 1, 1))
+            else:
+                raise ValueError("srs_grid must be 2D or 3D")
+            if srs_grid.shape != (cfg.num_srs_ports, num_sc, num_sym):
+                raise ValueError(f"SRSConfig {tx}: srs_grid shape {srs_grid.shape} does not match expected ({cfg.num_srs_ports}, {num_sc}, {num_sym}).")
+            # Transpose srs_grid to shape [num_sym, num_sc, num_srs_ports]
             srs_grid_t = np.transpose(srs_grid, [2, 1, 0])
             for p in range(cfg.num_srs_ports):
                 mask_all[tx, p, :, :] = srs_mask
