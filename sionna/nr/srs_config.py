@@ -6,9 +6,9 @@
 """
 SRS configuration for the nr (5G) sub-package of the Sionna library.
 
-This module defines the SRSConfig class which holds the uplink SRS
-configuration parameters (as defined in 3GPP 38.211 §6.4.1.4) and
-provides methods to generate the SRS grid and accompanying info.
+This module defines the SRSConfig class which holds uplink SRS configuration
+parameters (per 3GPP 38.211 §6.4.1.4) and provides methods to generate the
+SRS grid and supplementary information.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ __all__ = ["SRSConfig"]
 
 class SRSConfig(Config):
     """
-    SRSConfig holds the configuration for the uplink sounding reference signal (SRS).
+    SRSConfig holds the configuration for an uplink SRS.
 
     Configurable parameters include:
       - num_srs_ports, symbol_start, num_srs_symbols, srs_period,
@@ -28,17 +28,10 @@ class SRSConfig(Config):
       - cyclic_shift_hopping_id, cyclic_shift_hopping_subset, hopping_finer_granularity,
       - enable_eight_port_tdm.
 
-    The class also computes additional parameters:
-      - Group and sequence numbers (u and v)
-      - Cyclic shift alpha (per port and OFDM symbol)
-      - WTDM weighting (for 8-port TDM)
-      - A low‐PAPR sequence (here using a Zadoff–Chu sequence)
-      - An info dictionary (with keys "SeqGroup", "NSeq", "Alpha", and "SeqLength")
-
-    The final SRS grid is a NumPy array of shape
-      [num_srs_ports, num_subcarriers, num_symbols_per_slot]
-    with the SRS sequence placed into the OFDM symbols from symbol_start
-    to symbol_start+num_srs_symbols.
+    The class computes additional parameters such as the group and sequence
+    numbers, cyclic shift (alpha), and returns an SRS grid array of shape
+      [num_srs_ports, num_subcarriers, num_symbols_per_slot].
+    It also stores an info dictionary (keys: "SeqGroup", "NSeq", "Alpha", "SeqLength").
     """
 
     def __init__(self, carrier_config=None, **kwargs):
@@ -46,15 +39,15 @@ class SRSConfig(Config):
         self._name = "SRS Configuration"
         self.carrier = carrier_config
 
-        # Default parameters (or user-supplied)
+        # Set default values (or use user-supplied ones via kwargs)
         self._ifndef("num_srs_ports", 1)
         self._ifndef("symbol_start", 0)
         self._ifndef("num_srs_symbols", 1)
-        self._ifndef("srs_period", "on")  # can also be [T_srs, offset]
+        self._ifndef("srs_period", "on")  # alternatively, a tuple [T_srs, offset]
         self._ifndef("c_srs", 0)
         self._ifndef("b_srs", 0)
         self._ifndef("k_tc", 2)
-        self._ifndef("group_seq_hopping", "neither")  # options: 'neither','groupHopping','sequenceHopping'
+        self._ifndef("group_seq_hopping", "neither")  # 'neither', 'groupHopping', 'sequenceHopping'
         self._ifndef("n_srs_id", 0)
         self._ifndef("frequency_scaling_factor", 1)
         self._ifndef("cyclic_shift", 0)
@@ -66,8 +59,7 @@ class SRSConfig(Config):
 
         self.check_config()
 
-    # ------------------------------------------------------------------
-    # Configurable properties
+    # --- Configurable Properties ---
 
     @property
     def carrier(self):
@@ -207,13 +199,10 @@ class SRSConfig(Config):
         assert isinstance(value, bool), "enable_eight_port_tdm must be bool"
         self._enable_eight_port_tdm = value
 
-    # ------------------------------------------------------------------
-    # Derived / Read-only properties
+    # --- Derived / Read-only Properties ---
 
     @property
     def is_candidate_slot(self):
-        # If srs_period is 'on' then always candidate; if 'off' then never;
-        # otherwise check (total_slot - offset) mod T_srs == 0.
         slot = self.carrier.slot_number
         nframe = self.carrier.frame_number
         if isinstance(self.srs_period, str):
@@ -236,27 +225,22 @@ class SRSConfig(Config):
         return self._lookup_srs_bandwidth_config(self.c_srs, self.b_srs)
 
     def _lookup_srs_bandwidth_config(self, c_srs, b_srs):
-        # Simplified placeholder: for demonstration we set
+        # Simplified mapping for demonstration.
         return (c_srs + 1) * 4
 
-    # ------------------------------------------------------------------
-    # Helper methods for SRS generation
-
+    # --- Helper Methods for SRS Generation ---
     @staticmethod
     def _zc_sequence(N, q):
         n = np.arange(N)
         return np.exp(-1j * np.pi * q * n * (n + 1) / N)
 
     def _group_number_hopping(self):
-        # Simplified: u = mod(n_srs_id, 30) for all symbols.
         return np.mod(self.n_srs_id, 30) * np.ones(self.num_srs_symbols)
 
     def _sequence_number_hopping(self):
-        # Simplified: v = zeros.
         return np.zeros(self.num_srs_symbols)
 
     def _get_fcsh(self, nCSmax):
-        # Simplified cyclic shift hopping:
         if self.cyclic_shift_hopping:
             fcsh = np.mod(np.arange(self.num_srs_symbols) + self.cyclic_shift_hopping_id, nCSmax)
             K = 1
@@ -266,13 +250,11 @@ class SRSConfig(Config):
         return fcsh, K
 
     def _compute_alpha(self, nCSmax):
-        # Compute cyclic shift alpha for each port and SRS symbol.
         NPorts = self.num_srs_ports
         KTC = self.k_tc
         nCS = self.cyclic_shift
         ports8tdm = self.enable_eight_port_tdm
 
-        # Determine local nCSmax from KTC (per MATLAB: [8,12,6] for [2,4,8])
         if KTC == 2:
             nCSmax_local = 8
         elif KTC == 4:
@@ -282,7 +264,7 @@ class SRSConfig(Config):
         else:
             nCSmax_local = nCSmax
 
-        p = 1000 + np.arange(NPorts)  # shape (NPorts,)
+        p = 1000 + np.arange(NPorts)
         if ports8tdm:
             NBarAP = 4
             pBar = 1000 + np.mod(p, 2)
@@ -301,17 +283,15 @@ class SRSConfig(Config):
 
         nCSp = np.mod(nCS + nCSmax_local * np.floor((pBar - 1000) / scaling) / (NBarAP / scaling), nCSmax_local)
         fcsh, K = self._get_fcsh(nCSmax_local)
-        # Broadcast: result alpha shape is (NPorts, num_srs_symbols)
         alpha = (2 * np.pi / nCSmax_local) * (nCSp[:, np.newaxis] + fcsh[np.newaxis, :] / K)
-        return alpha
-
+        # For simplicity, return one alpha per port (taking first symbol’s value)
+        return alpha[:, 0]
+    
     def _get_wtdm(self):
-        # Compute WTDM weighting matrix.
         NSym = self.num_srs_symbols
         NPorts = self.num_srs_ports
         if self.enable_eight_port_tdm:
             wtdm = np.ones((NSym, NPorts))
-            # Simplified: zero out pilots on alternate symbols for specific ports.
             for s in range(1, NSym, 2):
                 if NPorts >= 8:
                     wtdm[s, [2, 3, 6, 7]] = 0
@@ -322,36 +302,23 @@ class SRSConfig(Config):
             return np.ones((NSym, NPorts))
 
     def _low_papr_sequence(self, u, v, alpha, Msc):
-        # Generate a low-PAPR sequence for one OFDM symbol.
         seq = np.zeros((self.num_srs_ports, Msc), dtype=complex)
         for p in range(self.num_srs_ports):
-            # For demonstration, let q = int(u) + p + 1.
             q = int(u) + p + 1
             zc = self._zc_sequence(Msc, q)
             seq[p, :] = zc * np.exp(1j * alpha[p])
         return seq
 
-    # ------------------------------------------------------------------
-    # SRS grid generation
-
+    # --- SRS Grid Generation ---
     @property
     def srs_grid(self):
-        """
-        Returns the SRS resource grid of shape:
-          [num_srs_ports, num_subcarriers, num_symbols_per_slot]
-        SRS is placed in the OFDM symbols [symbol_start, symbol_start+num_srs_symbols)
-        if the current slot is a candidate. Also, an info dictionary is stored.
-        """
         if not self.is_candidate_slot:
             return np.zeros((self.num_srs_ports, self.num_subcarriers, self.num_symbols_per_slot), dtype=complex)
-
-        # Determine the number of subcarriers allocated to SRS.
         M_srs_all = self.m_srs_bsrs
         n_sub_srs = (M_srs_all * 12) // (self.k_tc * self.frequency_scaling_factor)
         Msc = n_sub_srs
         NSym = self.num_srs_symbols
 
-        # Compute group (u) and sequence (v) numbers.
         if self.group_seq_hopping.lower() == "grouphopping":
             u = self._group_number_hopping()
             v = np.zeros(NSym)
@@ -362,7 +329,6 @@ class SRSConfig(Config):
             u = np.mod(self.n_srs_id, 30) * np.ones(NSym)
             v = np.zeros(NSym)
 
-        # Determine nCSmax based on k_tc.
         if self.k_tc == 2:
             nCSmax = 8
         elif self.k_tc == 4:
@@ -372,38 +338,26 @@ class SRSConfig(Config):
         else:
             nCSmax = 8
 
-        # Compute alpha: shape (num_srs_ports, NSym)
         alpha = self._compute_alpha(nCSmax)
-        # Get WTDM weighting: shape (NSym, num_srs_ports)
         wtdm = self._get_wtdm()
 
-        # Initialize the grid.
         A = np.zeros((self.num_srs_ports, self.num_subcarriers, self.num_symbols_per_slot), dtype=complex)
-        # For each SRS symbol (placed at indices symbol_start ... symbol_start+NSym-1)
         for s in range(NSym):
-            seq = self._low_papr_sequence(u[s], v[s], alpha[:, s], Msc)  # shape: (num_srs_ports, Msc)
+            seq = self._low_papr_sequence(u[s], v[s], alpha, Msc)
             for p in range(self.num_srs_ports):
                 seq[p, :] *= wtdm[s, p]
             l = self.symbol_start + s
             A[:, 0:Msc, l] = seq
-        # Store info.
         self._info = {
             "SeqGroup": u,
             "NSeq": v,
-            "Alpha": alpha.T,  # one row per OFDM symbol
+            "Alpha": alpha,  # one value per port (for simplicity)
             "SeqLength": Msc
         }
         return A
 
     @property
     def info(self):
-        """
-        Returns a dictionary with additional SRS generation information:
-          - SeqGroup: group numbers (u) per SRS symbol,
-          - NSeq: sequence numbers (v),
-          - Alpha: cyclic shift values (per port and symbol),
-          - SeqLength: length of the SRS sequence.
-        """
         if hasattr(self, "_info"):
             return self._info
         else:
@@ -411,10 +365,6 @@ class SRSConfig(Config):
             return self._info
 
     def srs_mask(self):
-        """
-        Returns a boolean mask of shape [num_subcarriers, num_symbols_per_slot]
-        indicating which resource elements contain SRS.
-        """
         M_srs_all = self.m_srs_bsrs
         n_sub_srs = (M_srs_all * 12) // (self.k_tc * self.frequency_scaling_factor)
         mask = np.zeros((self.num_subcarriers, self.num_symbols_per_slot), dtype=bool)
