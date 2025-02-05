@@ -1,0 +1,5 @@
+1- git clone https://github.com/youssefg9/nvs.git
+2- update the codes
+3- add if __name__ == "__main__": to the file under test to check the changes
+4- to pip install the current cloned repo instead of using (pip install sionna)
+    pip install -e . 
