@@ -34,7 +34,6 @@ class SRSPilotPattern(PilotPattern):
         else:
             for cfg in srs_configs:
                 assert isinstance(cfg, SRSConfig), "All elements must be SRSConfig instances."
-                
         num_tx = len(srs_configs)
         carrier = srs_configs[0].carrier
         num_sc = carrier.n_size_grid * 12
@@ -42,72 +41,57 @@ class SRSPilotPattern(PilotPattern):
         for i, cfg in enumerate(srs_configs):
             assert cfg.carrier.num_symbols_per_slot == num_sym, f"SRS config {i} has a different num_symbols_per_slot."
             assert (cfg.carrier.n_size_grid * 12) == num_sc, f"SRS config {i} has a different subcarrier dimension."
-            
-        # Determine the maximum number of ports among all SRS configurations.
         max_ports = max(cfg.num_srs_ports for cfg in srs_configs)
         
         # Allocate a uniform pilot mask: shape [num_tx, max_ports, num_sym, num_sc]
         mask_all = np.zeros((num_tx, max_ports, num_sym, num_sc), dtype=bool)
-        # Use a nested list to collect pilot arrays for each transmitter and port.
+        # Create a nested list to hold pilot sequences for each transmitter/port.
         pilot_values = [[None] * max_ports for _ in range(num_tx)]
         
         for tx in range(num_tx):
             cfg = srs_configs[tx]
-            # Get the SRS mask (expected shape: [num_sc, num_sym]) and transpose it to [num_sym, num_sc].
-            srs_mask = cfg.srs_mask().T  
-            # Get the SRS grid from the configuration.
-            # Expected shape: [num_srs_ports, num_sc, num_sym]
-            srs_grid = np.asarray(cfg.srs_grid)
-            # --- Patch: force srs_grid to be 3D ---
-            if srs_grid.ndim == 2:
-                # Assume shape (num_sc, num_sym); add a new axis for ports.
-                srs_grid = srs_grid[np.newaxis, :, :]
-            elif srs_grid.ndim > 3:
-                raise ValueError("srs_grid has too many dimensions.")
-            # Now, if the number of ports in srs_grid is less than configured, replicate it.
-            if srs_grid.shape[0] < cfg.num_srs_ports:
-                # We use np.repeat along axis 0 to duplicate the single‐port grid.
-                srs_grid = np.repeat(srs_grid, cfg.num_srs_ports, axis=0)
-                srs_grid = srs_grid[:cfg.num_srs_ports, :, :]
-            elif srs_grid.shape[0] > cfg.num_srs_ports:
-                srs_grid = srs_grid[:cfg.num_srs_ports, :, :]
-            if srs_grid.shape != (cfg.num_srs_ports, num_sc, num_sym):
-                raise ValueError(f"SRSConfig {tx}: srs_grid shape {srs_grid.shape} does not match expected ({cfg.num_srs_ports}, {num_sc}, {num_sym}).")
-            # Transpose srs_grid to shape [num_sym, num_sc, num_srs_ports]
-            srs_grid_t = np.transpose(srs_grid, [2, 1, 0])
-            # Loop over the available ports in this configuration.
+            # Get SRS mask: expected shape (num_sc, num_sym); transpose to (num_sym, num_sc).
+            srs_mask = np.asarray(cfg.srs_mask()).T
+            # Get SRS grid; expected shape: (num_srs_ports, num_sc, num_sym)
+            grid = np.asarray(cfg.srs_grid)
+            # --- Force grid to be 3D ---
+            if grid.ndim == 2:
+                # Assume shape (num_sc, num_sym) and add a new axis.
+                grid = grid[np.newaxis, :, :]
+            # Now, force first axis to have length equal to cfg.num_srs_ports.
+            if grid.shape[0] != cfg.num_srs_ports:
+                # Use np.resize which repeats the data as needed.
+                grid = np.resize(grid, (cfg.num_srs_ports, num_sc, num_sym))
+            if grid.shape != (cfg.num_srs_ports, num_sc, num_sym):
+                raise ValueError(f"SRSConfig {tx}: grid shape {grid.shape} does not match expected ({cfg.num_srs_ports}, {num_sc}, {num_sym}).")
+            # Transpose grid to shape (num_sym, num_sc, num_srs_ports)
+            grid_t = np.transpose(grid, [2, 1, 0])
+            # For each port available in this configuration...
             for p in range(cfg.num_srs_ports):
                 mask_all[tx, p, :, :] = srs_mask
-                # Now, srs_grid_t[:, :, p] has shape [num_sym, num_sc]
-                grid_flat = srs_grid_t[:, :, p].flatten(order='C')
-                mask_flat = srs_mask.flatten(order='C')
-                pilot_vals = grid_flat[mask_flat]
-                pilot_values[tx][p] = pilot_vals
-            # For ports that are not present in this configuration (if cfg.num_srs_ports < max_ports),
-            # we set the pilot values to an array of zeros (we use a temporary length 0 here).
+                # grid_t[:, :, p] has shape (num_sym, num_sc)
+                flat_grid = grid_t[:, :, p].flatten(order='C')
+                flat_mask = srs_mask.flatten(order='C')
+                pilot_seq = flat_grid[flat_mask]
+                pilot_values[tx][p] = pilot_seq
+            # For ports that are not present (if cfg.num_srs_ports < max_ports), fill with zeros.
             for p in range(cfg.num_srs_ports, max_ports):
-                pilot_values[tx][p] = None  # we'll fill these later
+                pilot_values[tx][p] = np.zeros(0, dtype=complex)
         
-        # Determine the maximum pilot length among all defined pilot streams.
+        # Determine the maximum pilot sequence length across all tx and ports.
         global_max_len = 0
         for tx in range(num_tx):
             for p in range(max_ports):
-                vals = pilot_values[tx][p]
-                if vals is not None:
-                    global_max_len = max(global_max_len, len(vals))
-        # For any pilot stream that is missing (None), fill it with zeros of length global_max_len.
-        for tx in range(num_tx):
-            for p in range(max_ports):
-                if pilot_values[tx][p] is None:
-                    pilot_values[tx][p] = np.zeros(global_max_len, dtype=complex)
-                    
+                if pilot_values[tx][p] is not None:
+                    global_max_len = max(global_max_len, len(pilot_values[tx][p]))
         # Build a uniform pilots array of shape [num_tx, max_ports, global_max_len].
         pilots_all = np.zeros((num_tx, max_ports, global_max_len), dtype=complex)
         for tx in range(num_tx):
             for p in range(max_ports):
-                vals = pilot_values[tx][p]
-                pilots_all[tx, p, :len(vals)] = vals
-        
+                seq = pilot_values[tx][p]
+                if seq is not None:
+                    pilots_all[tx, p, :len(seq)] = seq
+
         super().__init__(
             mask_all,
             pilots_all,
