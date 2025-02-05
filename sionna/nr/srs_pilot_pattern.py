@@ -50,16 +50,21 @@ class SRSPilotPattern(PilotPattern):
         for tx in range(num_tx):
             cfg = srs_configs[tx]
             srs_mask = cfg.srs_mask().T  # shape: [num_sym, num_sc]
-            srs_grid = cfg.srs_grid  # expected shape: [num_srs_ports, num_sc, num_sym]
-            # --- Patch: force srs_grid to be 3D ---
+            srs_grid = np.asarray(cfg.srs_grid)  # ensure numpy array
+
+            # --- Patch: force srs_grid to be 3D with shape (num_srs_ports, num_sc, num_sym) ---
             if srs_grid.ndim == 2:
                 # Assume shape (num_sc, num_sym); add a port axis.
-                srs_grid = srs_grid[np.newaxis, :, :]
+                srs_grid = srs_grid.reshape((1, srs_grid.shape[0], srs_grid.shape[1]))
             elif srs_grid.ndim > 3:
                 raise ValueError("srs_grid has too many dimensions.")
-            # Now ensure the first axis matches the configured number of ports.
+            # Now force first axis to equal cfg.num_srs_ports.
             if srs_grid.shape[0] < cfg.num_srs_ports:
-                srs_grid = np.tile(srs_grid, (cfg.num_srs_ports, 1, 1))
+                # Instead of tile, use repeat to replicate the existing grid.
+                srs_grid = np.repeat(srs_grid, cfg.num_srs_ports, axis=0)
+                # Now srs_grid.shape[0] equals cfg.num_srs_ports * (original value),
+                # so we take only the first cfg.num_srs_ports slices.
+                srs_grid = srs_grid[:cfg.num_srs_ports, :, :]
             elif srs_grid.shape[0] > cfg.num_srs_ports:
                 srs_grid = srs_grid[:cfg.num_srs_ports, :, :]
             if srs_grid.shape != (cfg.num_srs_ports, num_sc, num_sym):
@@ -69,6 +74,7 @@ class SRSPilotPattern(PilotPattern):
             # For each port in this configuration.
             for p in range(cfg.num_srs_ports):
                 mask_all[tx, p, :, :] = srs_mask
+                # srs_grid_t[:, :, p] now has shape (num_sym, num_sc)
                 grid_flat = srs_grid_t[:, :, p].flatten(order='C')
                 mask_flat = srs_mask.flatten(order='C')
                 pilot_vals = grid_flat[mask_flat]
