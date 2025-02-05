@@ -14,7 +14,7 @@ SRS grid and supplementary information.
 import numpy as np
 from sionna import nr
 from .config import Config
-from .utils import generate_prng_seq  # make sure this helper function is available
+from .utils import generate_prng_seq  # ensure this helper function is available
 
 __all__ = ["SRSConfig"]
 
@@ -29,9 +29,9 @@ class SRSConfig(Config):
       - cyclic_shift_hopping_id, cyclic_shift_hopping_subset, hopping_finer_granularity,
       - enable_eight_port_tdm.
 
-    The class computes additional parameters (e.g. group/sequence numbers,
-    cyclic shift “alpha”) and returns an SRS grid of shape
-      [num_srs_ports, num_subcarriers, num_symbols_per_slot].
+    The class computes additional parameters (such as group/sequence numbers and cyclic shift alpha)
+    and returns an SRS grid of shape
+         [num_srs_ports, num_subcarriers, num_symbols_per_slot].
     An info dictionary is stored with keys "SeqGroup", "NSeq", "Alpha", and "SeqLength".
     """
 
@@ -40,15 +40,15 @@ class SRSConfig(Config):
         self._name = "SRS Configuration"
         self.carrier = carrier_config
 
-        # Set default values (or use user-supplied ones)
+        # Set default parameters (or use user-supplied ones)
         self._ifndef("num_srs_ports", 1)
         self._ifndef("symbol_start", 0)
         self._ifndef("num_srs_symbols", 1)
-        self._ifndef("srs_period", "on")  # or [T_srs, offset]
+        self._ifndef("srs_period", "on")  # or a tuple [T_srs, offset]
         self._ifndef("c_srs", 0)
         self._ifndef("b_srs", 0)
         self._ifndef("k_tc", 2)
-        self._ifndef("group_seq_hopping", "neither")  # 'neither','groupHopping','sequenceHopping'
+        self._ifndef("group_seq_hopping", "neither")  # options: 'neither','groupHopping','sequenceHopping'
         self._ifndef("n_srs_id", 0)
         self._ifndef("frequency_scaling_factor", 1)
         self._ifndef("cyclic_shift", 0)
@@ -224,7 +224,6 @@ class SRSConfig(Config):
         return self._lookup_srs_bandwidth_config(self.c_srs, self.b_srs)
 
     def _lookup_srs_bandwidth_config(self, c_srs, b_srs):
-        # Simplified mapping for demonstration.
         return (c_srs + 1) * 4
 
     # --- Helper Methods for SRS Generation ---
@@ -283,7 +282,6 @@ class SRSConfig(Config):
         nCSp = np.mod(nCS + nCSmax_local * np.floor((pBar - 1000) / scaling) / (NBarAP / scaling), nCSmax_local)
         fcsh, K = self._get_fcsh(nCSmax_local)
         alpha = (2 * np.pi / nCSmax_local) * (nCSp[:, np.newaxis] + fcsh[np.newaxis, :] / K)
-        # For simplicity, return one alpha per port (first symbol)
         return alpha[:, 0]
 
     def _get_wtdm(self):
