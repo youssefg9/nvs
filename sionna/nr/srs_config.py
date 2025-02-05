@@ -14,6 +14,7 @@ SRS grid and supplementary information.
 import numpy as np
 from sionna import nr
 from .config import Config
+from .utils import generate_prng_seq  # ensure this helper function is available
 
 __all__ = ["SRSConfig"]
 
@@ -47,7 +48,7 @@ class SRSConfig(Config):
         self._ifndef("c_srs", 0)
         self._ifndef("b_srs", 0)
         self._ifndef("k_tc", 2)
-        self._ifndef("group_seq_hopping", "neither")  # 'neither', 'groupHopping', 'sequenceHopping'
+        self._ifndef("group_seq_hopping", "neither")  # options: 'neither', 'groupHopping', 'sequenceHopping'
         self._ifndef("n_srs_id", 0)
         self._ifndef("frequency_scaling_factor", 1)
         self._ifndef("cyclic_shift", 0)
@@ -284,9 +285,9 @@ class SRSConfig(Config):
         nCSp = np.mod(nCS + nCSmax_local * np.floor((pBar - 1000) / scaling) / (NBarAP / scaling), nCSmax_local)
         fcsh, K = self._get_fcsh(nCSmax_local)
         alpha = (2 * np.pi / nCSmax_local) * (nCSp[:, np.newaxis] + fcsh[np.newaxis, :] / K)
-        # For simplicity, return one alpha per port (taking first symbol’s value)
+        # For simplicity, return one alpha per port (first symbol)
         return alpha[:, 0]
-    
+
     def _get_wtdm(self):
         NSym = self.num_srs_symbols
         NPorts = self.num_srs_ports
@@ -351,7 +352,7 @@ class SRSConfig(Config):
         self._info = {
             "SeqGroup": u,
             "NSeq": v,
-            "Alpha": alpha,  # one value per port (for simplicity)
+            "Alpha": alpha,
             "SeqLength": Msc
         }
         return A

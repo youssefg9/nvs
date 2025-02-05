@@ -28,7 +28,7 @@ class SRSPilotPattern(PilotPattern):
         Datatype for internal calculations and output (default: tf.complex64).
     """
     def __init__(self, srs_configs, dtype=tf.complex64):
-        # Convert a single SRSConfig to a list, if needed.
+        # Convert a single SRSConfig to a list.
         if isinstance(srs_configs, SRSConfig):
             srs_configs = [srs_configs]
         else:
@@ -49,14 +49,13 @@ class SRSPilotPattern(PilotPattern):
 
         for tx in range(num_tx):
             cfg = srs_configs[tx]
-            # Obtain the SRS mask (expected shape: [num_sc, num_sym]) and transpose to [num_sym, num_sc]
-            srs_mask = cfg.srs_mask().T
-            # Obtain the SRS grid.
-            srs_grid = cfg.srs_grid  # Ideally shape: [num_srs_ports, num_sc, num_sym]
-            # Patch: ensure srs_grid is at least 3D and has the proper first dimension.
+            srs_mask = cfg.srs_mask().T  # shape: [num_sym, num_sc]
+            srs_grid = cfg.srs_grid  # expected shape: [num_srs_ports, num_sc, num_sym]
+            # Patch: if srs_grid is 2D, add a port dimension.
+            if srs_grid.ndim == 2:
+                srs_grid = srs_grid[np.newaxis, ...]
             srs_grid = np.atleast_3d(srs_grid)
             if srs_grid.shape[0] != cfg.num_srs_ports:
-                # If only one port is returned but more were requested, tile along axis 0.
                 srs_grid = np.tile(srs_grid, (cfg.num_srs_ports, 1, 1))
             if srs_grid.shape[1] != num_sc or srs_grid.shape[2] != num_sym:
                 raise ValueError(f"SRSConfig {tx}: srs_grid shape {srs_grid.shape} does not match expected [{cfg.num_srs_ports}, {num_sc}, {num_sym}].")
