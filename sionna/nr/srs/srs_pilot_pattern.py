@@ -2,8 +2,8 @@
 srs_pilot_pattern.py
 
 Definition of the SRS pilot pattern class that generates uplink SRS pilot signals.
-The SRSPilotPattern inherits from sionna.ofdm.PilotPattern and creates both a pilot
-mask and corresponding pilot symbols based on one or more SRSConfig objects.
+This class inherits from sionna.ofdm.PilotPattern and computes a boolean mask and
+the corresponding pilot symbols based on one or more SRSConfig objects.
 """
 
 import warnings
@@ -11,11 +11,12 @@ import numpy as np
 import tensorflow as tf
 from sionna.ofdm import PilotPattern
 
+# Import the SRSConfig class
 from srs_config import SRSConfig
 
 
 def zadoff_chu_seq(u, Nzc):
-    """Generate a Zadoff–Chu sequence of length Nzc with root u.
+    r"""Generate a Zadoff–Chu sequence of length Nzc with root u.
 
     Parameters
     ----------
@@ -27,7 +28,7 @@ def zadoff_chu_seq(u, Nzc):
     Returns
     -------
     seq : np.ndarray
-        Zadoff–Chu sequence (complex64).
+        Zadoff–Chu sequence (np.complex64).
     """
     n = np.arange(Nzc)
     seq = np.exp(-1j * np.pi * u * n * (n + 1) / float(Nzc))
@@ -51,7 +52,7 @@ def generate_srs_sequence(srs_cfg, Msc, num_symbols, port_index):
     Returns
     -------
     seq_total : np.ndarray
-        Concatenated SRS sequence of length num_symbols * Msc.
+        Concatenated SRS sequence of length (num_symbols * Msc).
     """
     # Use NSRSID (offset by port index) as the ZC root (ensure nonzero)
     u = (srs_cfg.NSRSID + port_index) % Msc
@@ -70,11 +71,11 @@ def generate_srs_sequence(srs_cfg, Msc, num_symbols, port_index):
 
 
 class SRSPilotPattern(PilotPattern):
-    r"""SRSPilotPattern(srs_configs, resource_grid, dtype=tf.complex64)
+    r"""SRSPilotPattern(srs_configs, resource_grid, *, dtype=tf.complex64)
 
     Creates an SRS pilot pattern that designates the positions and values of SRS signals.
-    One or more SRSConfig objects are used (one per user/transmitter) together with a
-    ResourceGrid to compute a boolean mask and corresponding pilot symbols.
+    Accepts one or more SRSConfig objects (for single- or multiuser scenarios) along with
+    a ResourceGrid. A boolean mask and pilot symbols are computed.
 
     Parameters
     ----------
@@ -82,38 +83,34 @@ class SRSPilotPattern(PilotPattern):
         A single SRS configuration object or a list (for multiuser scenarios).
     resource_grid : ResourceGrid
         An instance of sionna.ofdm.ResourceGrid.
-    dtype : tf.DType, optional
+    dtype : tf.DType, optional (keyword-only)
         Data type for internal calculations (default: tf.complex64).
     """
-    def __init__(self,
-                 srs_configs,
-                 resource_grid,
-                 dtype=tf.complex64):
-        # Wrap a single configuration into a list.
+    def __init__(self, srs_configs, resource_grid, *, dtype=tf.complex64):
+        # Ensure srs_configs is a list.
         if isinstance(srs_configs, SRSConfig):
             srs_configs = [srs_configs]
         self._srs_configs = srs_configs
 
-        # Get resource grid parameters.
+        # Extract grid parameters.
         num_ofdm_symbols = resource_grid.num_ofdm_symbols
         num_eff_sc = resource_grid.num_effective_subcarriers
 
-        # Number of transmitters equals the number of SRS configurations.
+        # Number of transmitters equals the number of SRS configuration objects.
         num_tx = len(srs_configs)
-        # Assume each SRSConfig defines the number of ports for that user.
+        # Assume each SRSConfig defines the number of ports (streams) for that user.
         num_streams_per_tx = srs_configs[0].NumSRSPorts
 
-        # Create a boolean mask for the full grid with shape:
+        # Create a boolean mask for the full grid: shape
         # [num_tx, num_streams_per_tx, num_ofdm_symbols, num_eff_sc]
         mask = np.zeros([num_tx, num_streams_per_tx, num_ofdm_symbols, num_eff_sc], dtype=bool)
 
-        # List to hold pilot symbols for each transmitter.
+        # Build a list of pilot symbols for each transmitter.
         pilots_list = []
 
         for i, srs_cfg in enumerate(srs_configs):
-            # Use the provided Msc.
-            Msc = srs_cfg.Msc
-            # Determine frequency indices for SRS.
+            Msc = srs_cfg.Msc  # Number of subcarriers allocated to SRS
+            # Frequency indices for SRS.
             f_start = srs_cfg.FrequencyStart
             f_end = f_start + Msc
             if f_end > num_eff_sc:
@@ -121,7 +118,7 @@ class SRSPilotPattern(PilotPattern):
                 f_end = num_eff_sc
                 Msc = f_end - f_start
 
-            # Determine time indices for SRS.
+            # Time indices (OFDM symbols) for SRS.
             t_start = srs_cfg.SymbolStart
             t_end = t_start + srs_cfg.NumSRSSymbols
             if t_end > num_ofdm_symbols:
@@ -140,9 +137,10 @@ class SRSPilotPattern(PilotPattern):
         # Stack pilots for all transmitters: shape [num_tx, num_streams_per_tx, num_pilots]
         pilots = np.stack(pilots_list, axis=0)
 
+        # Call the base PilotPattern constructor.
         super().__init__(mask, pilots, trainable=False, normalize=False, dtype=dtype)
 
     @property
     def srs_configs(self):
-        """List of SRS configuration objects."""
+        """Return the list of SRS configuration objects."""
         return self._srs_configs

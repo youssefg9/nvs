@@ -1,9 +1,8 @@
 """
 srs_config.py
 
-Definition of the SRS configuration object for uplink Sounding Reference Signals.
-This minimal configuration class holds only the parameters needed for the current SRS
-pilot generation implementation.
+Definition of a minimal SRS configuration object for uplink Sounding Reference Signals.
+This configuration holds only the parameters needed by our SRS pilot generation.
 """
 
 class SRSConfig:
@@ -22,44 +21,44 @@ class SRSConfig:
     Msc : int, optional
         Number of subcarriers allocated to SRS per OFDM symbol. Default is 12.
     KTC : int, optional
-        Transmission comb number. (Not actively used in this minimal implementation.) Default is 2.
+        Transmission comb number (not actively used in this minimal implementation). Default is 2.
     FrequencyScalingFactor : int, optional
-        Scaling factor for partial frequency sounding. (Not actively used here.) Default is 1.
+        Scaling factor for partial frequency sounding (not actively used here). Default is 1.
     CyclicShift : int, optional
         Cyclic shift applied to the SRS sequence (in number of subcarriers). Default is 0.
     NSRSID : int, optional
         SRS scrambling identity. Default is 0.
     """
     def __init__(self,
-                 num_srs_ports=1,
-                 symbol_start=13,
-                 num_srs_symbols=1,
-                 frequency_start=0,
-                 msc=12,
-                 ktc=2,
-                 frequency_scaling_factor=1,
-                 cyclic_shift=0,
-                 nsrsid=0):
-        self.num_srs_ports = num_srs_ports
-        self.symbol_start = symbol_start
-        self.num_srs_symbols = num_srs_symbols
-        self.frequency_start = frequency_start
-        self.msc = msc
-        self.ktc = ktc
-        self.frequency_scaling_factor = frequency_scaling_factor
-        self.cyclic_shift = cyclic_shift
-        self.nsrsid = nsrsid
+                 NumSRSPorts=1,
+                 SymbolStart=13,
+                 NumSRSSymbols=1,
+                 FrequencyStart=0,
+                 Msc=12,
+                 KTC=2,
+                 FrequencyScalingFactor=1,
+                 CyclicShift=0,
+                 NSRSID=0):
+        self.NumSRSPorts = NumSRSPorts
+        self.SymbolStart = SymbolStart
+        self.NumSRSSymbols = NumSRSSymbols
+        self.FrequencyStart = FrequencyStart
+        self.Msc = Msc
+        self.KTC = KTC
+        self.FrequencyScalingFactor = FrequencyScalingFactor
+        self.CyclicShift = CyclicShift
+        self.NSRSID = NSRSID
 
         self._validate_params()
 
     def _validate_params(self):
-        if not isinstance(self.num_srs_ports, int) or self.num_srs_ports <= 0:
+        if not isinstance(self.NumSRSPorts, int) or self.NumSRSPorts <= 0:
             raise ValueError("NumSRSPorts must be a positive integer.")
-        if not 0 <= self.symbol_start < 14:
+        if not (0 <= self.SymbolStart < 14):
             raise ValueError("SymbolStart must be between 0 and 13.")
-        if self.num_srs_symbols not in [1, 2, 4, 8, 10, 12, 14]:
+        if self.NumSRSSymbols not in [1, 2, 4, 8, 10, 12, 14]:
             raise ValueError("NumSRSSymbols must be one of [1, 2, 4, 8, 10, 12, 14].")
-        if not isinstance(self.frequency_start, int) or self.frequency_start < 0:
+        if not isinstance(self.FrequencyStart, int) or self.FrequencyStart < 0:
             raise ValueError("FrequencyStart must be a non-negative integer.")
-        if not isinstance(self.msc, int) or self.msc <= 0:
+        if not isinstance(self.Msc, int) or self.Msc <= 0:
             raise ValueError("Msc must be a positive integer.")
