@@ -46,24 +46,23 @@ class ResourceGrid():
             Indicates if the DC carrier is nulled or not.
 
         pilot_pattern : One of [None, str, PilotPattern, list]
-            - If `None`, defaults to an empty pilot pattern.
-            - If a `str`, must be one of
-              `"kronecker"` or `"empty"`.
-              (`"kronecker"` requires the attribute
-              `pilot_ofdm_symbol_indices` to be provided.)
-            - If a :class:`~sionna.ofdm.PilotPattern`, it is used directly.
-            - If a `list`, can be a mixture of any of the above, in which case
-              they are all merged into a single pilot pattern. An error is
-              raised if any of them overlap.
+            The pilot pattern configuration. If a list is provided, multiple
+            patterns are merged. Overlapping pilots raise an error.
+
+            - `None` defaults to an empty pilot pattern.
+            - A `str` must be one of `"kronecker"` or `"empty"`.
+              (`"kronecker"` requires `pilot_ofdm_symbol_indices`.)
+            - A :class:`~sionna.ofdm.PilotPattern` object is used directly.
+            - A `list` of any combination of the above merges them all.
 
         pilot_ofdm_symbol_indices : List, int
             List of indices of OFDM symbols reserved for pilot transmissions.
-            Only needed if ``pilot_pattern="kronecker"`` (or if the list
-            includes `"kronecker"`). Defaults to `None`.
+            Only needed if `pilot_pattern="kronecker"` or if the list includes
+            `"kronecker"`. Defaults to `None`.
 
         dtype : tf.Dtype
-            Defines the datatype for internal calculations and the output
-            dtype. Defaults to `tf.complex64`.
+            Datatype for internal calculations and output.
+            Defaults to `tf.complex64`.
     """
     def __init__(self,
                  num_ofdm_symbols,
@@ -88,7 +87,10 @@ class ResourceGrid():
         self._num_guard_carriers = np.array(num_guard_carriers)
         self._dc_null = dc_null
         self._pilot_ofdm_symbol_indices = pilot_ofdm_symbol_indices
+
+        # The setter merges multiple patterns if a list is passed.
         self.pilot_pattern = pilot_pattern
+
         self._check_settings()
 
     @property
@@ -259,7 +261,6 @@ class ResourceGrid():
                                     self.num_effective_subcarriers,
                                     dtype=self._dtype)
         combined_mask = tf.identity(base_pp.mask)  # int32
-        # We'll store the actual pilot values in a 4D array for accumulation
         combined_pilots_4d = tf.zeros_like(tf.cast(combined_mask, self._dtype))
 
         def to_pilot_pattern(item):
@@ -299,27 +300,25 @@ class ResourceGrid():
             if pp.mask.shape != base_pp.mask.shape:
                 raise ValueError("PilotPattern shape mismatch when merging.")
             # overlap detection:
-            # Overlap = positions where combined_mask ==1 AND pp.mask ==1
             overlap_bool = tf.logical_and(tf.equal(combined_mask, 1),
                                           tf.equal(pp.mask, 1))
             if tf.reduce_any(overlap_bool):
                 raise ValueError("Overlapping pilot allocations in pilot_pattern list.")
 
             # merge mask: OR => final=1 where either is 1
-            combined_mask = tf.where(tf.logical_or(tf.equal(combined_mask,1),
-                                                   tf.equal(pp.mask,1)),
-                                     1, 0)
+            union_bool = tf.logical_or(tf.equal(combined_mask,1),
+                                       tf.equal(pp.mask,1))
+            combined_mask = tf.where(union_bool, 1, 0)
 
             # place pilot symbols from pp into combined_pilots_4d
-            # We'll do a scatter for each (tx, stream)
             for t_ind in range(self._num_tx):
                 for s_ind in range(self._num_streams_per_tx):
                     submask = pp.mask[t_ind, s_ind]  # int32
-                    # we only place pilot symbols where submask=1
                     coords = tf.where(tf.equal(submask, 1))
-                    pilot_vals = pp.pilots[t_ind, s_ind]  # shape [#pilots]
+                    # -- cast coords to int32 to match tx_col/st_col
+                    coords = tf.cast(coords, tf.int32)
 
-                    # Expand coords => (tx,stream, row, col)
+                    pilot_vals = pp.pilots[t_ind, s_ind]  # shape [#pilots]
                     num_coords = tf.shape(coords)[0]
                     tx_col = tf.fill([num_coords,1], t_ind)
                     st_col = tf.fill([num_coords,1], s_ind)
@@ -331,8 +330,6 @@ class ResourceGrid():
                         pilot_vals)
 
         # Now build a final PilotPattern from combined_mask + combined_pilots_4d
-        # We must ensure each (tx,stream) has the same count of 1's => required by
-        # PilotPattern (the # of pilot symbols must be the same).
         pilot_counts = tf.reduce_sum(tf.cast(tf.equal(combined_mask,1), tf.int32),
                                      axis=(-2, -1))  # shape [num_tx, num_streams]
         minc = tf.reduce_min(pilot_counts)
@@ -349,6 +346,7 @@ class ResourceGrid():
             for s_ind in range(self._num_streams_per_tx):
                 mask_2d = combined_mask[t_ind, s_ind]  # shape [T, F_eff], int32
                 coords = tf.where(tf.equal(mask_2d, 1))
+                coords = tf.cast(coords, tf.int32)  # ensure int32 again
                 pilot_2d = combined_pilots_4d[t_ind, s_ind]
                 row_vals = tf.gather_nd(pilot_2d, coords)
                 row_list.append(row_vals)
@@ -371,7 +369,7 @@ class ResourceGrid():
         assert self._cyclic_prefix_length>=0, \
             "`cyclic_prefix_length must be nonnegative."
         assert self._cyclic_prefix_length<=self._fft_size, \
-            "`cyclic_prefix_length cannot be longer than `fft_size`."
+            "`cyclic_prefix_length` cannot be longer than `fft_size`."
         assert self._num_tx > 0, \
             "`num_tx` must be positive`."
         assert self._num_streams_per_tx > 0, \
@@ -408,17 +406,20 @@ class ResourceGrid():
         gc_r = 2*tf.ones(shape+[self._num_guard_carriers[1]], tf.int32)
         dc   = 3*tf.ones(shape + [tf.cast(self._dc_null, tf.int32)], tf.int32)
 
-        # self.pilot_pattern.mask has shape [num_tx, num_streams, T, F_eff],
-        # with 1 => pilot, 0 => data. We'll place them in the frequency axis
-        # excluding guard carriers/DC. We'll split around DC index.
         mask = self.pilot_pattern.mask
         split_ind = self.dc_ind - self._num_guard_carriers[0]
-        rg_type = tf.concat([gc_l,                 # Left Guards
-                             mask[...,:split_ind], # Data & pilots
-                             dc,                   # DC
-                             mask[...,split_ind:], # Data & pilots
-                             gc_r], -1)            # Right guards
-        return rg_type
+
+        rg_type = tf.concat(
+            [
+                gc_l,                 # Left Guards
+                mask[...,:split_ind], # Data & pilots
+                dc,                   # DC
+                mask[...,split_ind:], # Data & pilots
+                gc_r                  # Right guards
+            ],
+            axis=-1
+        )
+        return tf.cast(rg_type, tf.int32)
 
     def show(self, tx_ind=0, tx_stream_ind=0):
         """Visualizes the resource grid for a specific transmitter and stream.
@@ -438,16 +439,18 @@ class ResourceGrid():
         """
         fig = plt.figure()
         data = self.build_type_grid()[tx_ind, tx_stream_ind]
-        cmap = colors.ListedColormap([[60/256,8/256,72/256],    # data
-                                      [45/256,91/256,128/256],  # pilot
-                                      [45/256,172/256,111/256], # guard
-                                      [250/256,228/256,62/256]])# DC
+        cmap = colors.ListedColormap([
+            [60/256,   8/256,  72/256],   # data
+            [45/256,  91/256, 128/256],   # pilot
+            [45/256, 172/256, 111/256],   # guard
+            [250/256,228/256,  62/256]    # DC
+        ])
         bounds=[0,1,2,3,4]
         norm = colors.BoundaryNorm(bounds, cmap.N)
         img = plt.imshow(np.transpose(data), interpolation="nearest",
                          origin="lower", cmap=cmap, norm=norm,
                          aspect="auto")
-        cbar = plt.colorbar(img, ticks=[0.5, 1.5, 2.5, 3.5],
+        cbar = plt.colorbar(img, ticks=[0.5, 1.5, 2.5,3.5],
                             orientation="vertical", shrink=0.8)
         cbar.set_ticklabels(["Data", "Pilot", "Guard carrier", "DC carrier"])
         plt.title("OFDM Resource Grid")
