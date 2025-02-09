@@ -45,15 +45,21 @@ class ResourceGrid():
         dc_null : bool
             Indicates if the DC carrier is nulled or not.
 
-        pilot_pattern : One of [None, "kronecker", "empty", PilotPattern]
-            An instance of :class:`~sionna.ofdm.PilotPattern`, a string
-            shorthand for the :class:`~sionna.ofdm.KroneckerPilotPattern`
-            or :class:`~sionna.ofdm.EmptyPilotPattern`, or `None`.
-            Defaults to `None` which is equivalent to `"empty"`.
+        pilot_pattern : One of [None, str, PilotPattern, list]
+            - If `None`, defaults to an empty pilot pattern.
+            - If a `str`, must be one of
+              `"kronecker"` or `"empty"`.
+              (`"kronecker"` requires the attribute
+              `pilot_ofdm_symbol_indices` to be provided.)
+            - If a :class:`~sionna.ofdm.PilotPattern`, it is used directly.
+            - If a `list`, can be a mixture of any of the above, in which case
+              they are all merged into a single pilot pattern. An error is
+              raised if any of them overlap.
 
         pilot_ofdm_symbol_indices : List, int
             List of indices of OFDM symbols reserved for pilot transmissions.
-            Only needed if ``pilot_pattern="kronecker"``. Defaults to `None`.
+            Only needed if ``pilot_pattern="kronecker"`` (or if the list
+            includes `"kronecker"`). Defaults to `None`.
 
         dtype : tf.Dtype
             Defines the datatype for internal calculations and the output
@@ -187,41 +193,158 @@ class ResourceGrid():
 
     @property
     def dc_null(self):
-        """Indicates if the DC carriers is nulled or not."""
+        """Indicates if the DC carrier is nulled or not."""
         return self._dc_null
 
     @property
     def pilot_pattern(self):
-        """The used PilotPattern."""
+        """The used PilotPattern (possibly merged from multiple)."""
         return self._pilot_pattern
 
     @pilot_pattern.setter
     def pilot_pattern(self, value):
+        # If None, we default to EmptyPilotPattern
         if value is None:
             value = EmptyPilotPattern(self._num_tx,
                                       self._num_streams_per_tx,
                                       self._num_ofdm_symbols,
                                       self.num_effective_subcarriers,
                                       dtype=self._dtype)
-        elif isinstance(value, PilotPattern):
-            pass
+
+        # If we got a single PilotPattern object, or a single string, use existing logic
+        if isinstance(value, PilotPattern):
+            self._pilot_pattern = value
+            return
         elif isinstance(value, str):
             assert value in ["kronecker", "empty"],\
                 "Unknown pilot pattern"
             if value=="empty":
-                value = EmptyPilotPattern(self._num_tx,
-                                      self._num_streams_per_tx,
-                                      self._num_ofdm_symbols,
-                                      self.num_effective_subcarriers,
-                                      dtype=self._dtype)
+                self._pilot_pattern = EmptyPilotPattern(self._num_tx,
+                                                        self._num_streams_per_tx,
+                                                        self._num_ofdm_symbols,
+                                                        self.num_effective_subcarriers,
+                                                        dtype=self._dtype)
             elif value=="kronecker":
                 assert self._pilot_ofdm_symbol_indices is not None,\
-                    "You must provide pilot_ofdm_symbol_indices."
-                value = KroneckerPilotPattern(self,
-                        self._pilot_ofdm_symbol_indices, dtype=self._dtype)
-        else:
-            raise ValueError("Unsupported pilot_pattern")
-        self._pilot_pattern = value
+                    "You must provide pilot_ofdm_symbol_indices when using 'kronecker'."
+                self._pilot_pattern = KroneckerPilotPattern(self,
+                                                            self._pilot_ofdm_symbol_indices,
+                                                            dtype=self._dtype)
+            return
+
+        # If it's a list, we merge them. Minimal additional code:
+        if isinstance(value, list):
+            merged_pattern = self._merge_pilot_patterns(value)
+            self._pilot_pattern = merged_pattern
+            return
+
+        raise ValueError("Unsupported pilot_pattern. Must be None, 'empty', "
+                         "'kronecker', a PilotPattern, or a list of these.")
+
+    def _merge_pilot_patterns(self, pattern_list):
+        """
+        Merge multiple pilot patterns (or strings or None) into a single
+        PilotPattern. Overlapping pilot allocations lead to an error.
+        """
+        # Start from an EmptyPilotPattern
+        base = EmptyPilotPattern(self._num_tx,
+                                 self._num_streams_per_tx,
+                                 self._num_ofdm_symbols,
+                                 self.num_effective_subcarriers,
+                                 dtype=self._dtype)
+
+        def build_pilot_pattern(item):
+            """Convert item to a PilotPattern if it's str or None."""
+            if item is None:
+                return EmptyPilotPattern(self._num_tx,
+                                         self._num_streams_per_tx,
+                                         self._num_ofdm_symbols,
+                                         self.num_effective_subcarriers,
+                                         dtype=self._dtype)
+            if isinstance(item, PilotPattern):
+                return item
+            if isinstance(item, str):
+                assert item in ["kronecker", "empty"], \
+                    "Unknown pilot pattern in list."
+                if item=="empty":
+                    return EmptyPilotPattern(self._num_tx,
+                                             self._num_streams_per_tx,
+                                             self._num_ofdm_symbols,
+                                             self.num_effective_subcarriers,
+                                             dtype=self._dtype)
+                if item=="kronecker":
+                    assert self._pilot_ofdm_symbol_indices is not None,\
+                        "pilot_ofdm_symbol_indices required for 'kronecker'."
+                    return KroneckerPilotPattern(self,
+                                                 self._pilot_ofdm_symbol_indices,
+                                                 dtype=self._dtype)
+            raise ValueError("Items in pilot_pattern list must be None, "
+                             "str, or PilotPattern objects.")
+
+        # Combine
+        combined_mask = tf.zeros_like(base.mask)
+        combined_pilots_4d = tf.zeros_like(tf.cast(combined_mask, self._dtype))
+
+        # Merge each pattern
+        for item in pattern_list:
+            pp = build_pilot_pattern(item)
+
+            # check shapes
+            if pp.mask.shape != base.mask.shape:
+                raise ValueError("PilotPattern shape mismatch for merging.")
+            # check overlap
+            overlap = tf.logical_and(combined_mask, pp.mask)
+            if tf.reduce_any(overlap):
+                raise ValueError("Overlapping pilot allocations in the list.")
+            # combine mask
+            combined_mask = tf.logical_or(combined_mask, pp.mask)
+
+            # place pilot symbols
+            # We scatter from pp.pilots into combined_pilots_4d
+            for txi in range(self._num_tx):
+                for stri in range(self._num_streams_per_tx):
+                    submask = pp.mask[txi, stri]  # shape [T, F_eff]
+                    pilot_vals = pp.pilots[txi, stri]  # shape [#pilot]
+                    coords = tf.where(submask)
+                    # expand coords to 4D index: (txi, stri, row, col)
+                    tsize = tf.shape(coords)[0]
+                    prefix_tx = tf.fill([tsize, 1], txi)
+                    prefix_str = tf.fill([tsize, 1], stri)
+                    coords_4d = tf.concat([prefix_tx, prefix_str, coords], axis=1)
+                    combined_pilots_4d = tf.tensor_scatter_nd_update(
+                                                combined_pilots_4d,
+                                                coords_4d,
+                                                pilot_vals)
+
+        # Convert 4D pilot array back to [tx, str, #pilots].
+        final_pilots_list = []
+        # Summaries of # of pilots (mask) for each (tx, str)
+        n_pilots_per_stream = tf.reduce_sum(tf.cast(combined_mask, tf.int32),
+                                            axis=(-2, -1))
+        # Must check that all (tx, str) have same # of pilots => required by PilotPattern
+        min_val = tf.reduce_min(n_pilots_per_stream)
+        max_val = tf.reduce_max(n_pilots_per_stream)
+        if min_val != max_val:
+            raise ValueError("All transmit streams must have the same number "
+                             "of pilot symbols for a single PilotPattern. "
+                             "Your merged patterns differ.")
+        for txi in range(self._num_tx):
+            row_list = []
+            for stri in range(self._num_streams_per_tx):
+                submask = combined_mask[txi, stri]  # bool [T, F_eff]
+                coords = tf.where(submask)
+                pilot2d = combined_pilots_4d[txi, stri]  # shape [T, F_eff]
+                row_vals = tf.gather_nd(pilot2d, coords)
+                row_list.append(row_vals)
+            final_pilots_list.append(tf.stack(row_list, axis=0))
+
+        final_pilots_3d = tf.stack(final_pilots_list, axis=0)
+        merged = PilotPattern(mask=combined_mask,
+                              pilots=final_pilots_3d,
+                              trainable=False,
+                              normalize=False,
+                              dtype=self._dtype)
+        return merged
 
     def _check_settings(self):
         """Validate that all properties define a valid resource grid"""
@@ -275,7 +398,7 @@ class ResourceGrid():
                              dc,                   # DC
                              mask[...,split_ind:], # Data & pilots
                              gc_r], -1)            # Right guards
-        return rg_type
+        return tf.cast(rg_type, tf.int32)
 
     def show(self, tx_ind=0, tx_stream_ind=0):
         """Visualizes the resource grid for a specific transmitter and stream.
