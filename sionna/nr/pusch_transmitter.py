@@ -102,6 +102,7 @@ class PUSCHTransmitter(Layer):
                  output_domain="freq",
                  dtype=tf.complex64,
                  verbose=False,
+                 resource_grid=None,
                  **kwargs):
 
         assert dtype in [tf.complex64, tf.complex128], \
@@ -162,15 +163,18 @@ class PUSCHTransmitter(Layer):
                                                 dtype=dtype)
 
         # Create ResourceGrid
-        self._resource_grid = ResourceGrid(
-                            num_ofdm_symbols=self._num_ofdm_symbols,
-                            fft_size=self._num_subcarriers,
-                            subcarrier_spacing=self._subcarrier_spacing,
-                            num_tx=self._num_tx,
-                            num_streams_per_tx=self._num_layers,
-                            cyclic_prefix_length=self._cyclic_prefix_length,
-                            pilot_pattern=self._pilot_pattern,
-                            dtype=dtype)
+        if resource_grid is None:
+            self._resource_grid = ResourceGrid(
+                                num_ofdm_symbols=self._num_ofdm_symbols,
+                                fft_size=self._num_subcarriers,
+                                subcarrier_spacing=self._subcarrier_spacing,
+                                num_tx=self._num_tx,
+                                num_streams_per_tx=self._num_layers,
+                                cyclic_prefix_length=self._cyclic_prefix_length,
+                                pilot_pattern=self._pilot_pattern,
+                                dtype=dtype)
+        else:
+            self._resource_grid = resource_grid
 
         # Create ResourceGridMapper
         self._resource_grid_mapper = ResourceGridMapper(self._resource_grid,
