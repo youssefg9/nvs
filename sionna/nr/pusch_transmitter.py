@@ -63,6 +63,9 @@ class PUSCHTransmitter(Layer):
     verbose: bool
         If `True`, additional parameters are printed during initialization.
         Defaults to `False`.
+        
+    resource_grid : 
+        Tensor defining a `ResourceGrid` spanning multiple OFDM symbols and subcarriers.
 
     Input
     -----
@@ -195,8 +198,12 @@ class PUSCHTransmitter(Layer):
 
     @property
     def resource_grid(self):
-        """OFDM resource grid underlying the PUSCH transmissions"""
+        """Get OFDM resource grid underlying the PUSCH transmissions"""
         return self._resource_grid
+
+    def set_resource_grid(self,resource_grid):
+        "Set resource grid underlying the PUSCH transmissions "
+        self._resource_grid=resource_grid
 
     @property
     def pilot_pattern(self):
