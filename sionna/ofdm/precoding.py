@@ -5,17 +5,16 @@
 """Class definitions and functions related to OFDM transmit precoding.
 
 Extended to include:
+- ZF Precoding
 - MMSE (Regularized ZF) Precoding
 - MRT Precoding
-- C2PO Precoding
-- C3PO Precoding
 """
 
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import sionna
 from sionna.utils import flatten_dims
-from sionna.mimo import zero_forcing_precoder,regularized_zf_precoder,mrt_precoder,c2po_precoder,c3po_precoder
+from sionna.mimo import zero_forcing_precoder,regularized_zf_precoder,mrt_precoder
 from sionna.ofdm import RemoveNulledSubcarriers
 
 
