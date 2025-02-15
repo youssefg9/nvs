@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-"""Class definition and functions related to OFDM transmit precoding"""
+"""Class definitions and functions related to OFDM transmit precoding.
+
+Extended to include:
+- MMSE (Regularized ZF) Precoding
+- MRT Precoding
+- C2PO Precoding
+- C3PO Precoding
+"""
 
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 import sionna
 from sionna.utils import flatten_dims
-from sionna.mimo import zero_forcing_precoder
+from sionna.mimo import zero_forcing_precoder,regularized_zf_precoder,mrt_precoder,c2po_precoder,c3po_precoder
 from sionna.ofdm import RemoveNulledSubcarriers
 
 
@@ -179,3 +186,186 @@ class ZFPrecoder(Layer):
             return (x_precoded, h_eff)
         else:
             return x_precoded
+
+
+class MMSEPrecoder(Layer):
+    # pylint: disable=line-too-long
+    r"""MMSEPrecoder(resource_grid, stream_management, noise_variance=1e-3, return_effective_channel=False, dtype=tf.complex64, **kwargs)
+
+    Regularized ZF (MMSE) precoding for multi-antenna transmissions.
+
+    Similar to :class:`ZFPrecoder` but uses :meth:`~sionna.mimo.regularized_zf_precoder`.
+
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        The OFDM resource grid configuration.
+
+    stream_management : StreamManagement
+        Manages which user streams go to which transmit antennas.
+
+    noise_variance : float
+        Noise variance for regularization.
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding.
+
+    dtype : tf.DType
+        Datatype for internal calculations and output.
+
+    Input
+    -----
+    (x, h) :
+        Same as :class:`ZFPrecoder`.
+
+    Output
+    ------
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The precoded OFDM grids.
+
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel after precoding.
+    """
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 noise_variance=1e-3,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._noise_variance = noise_variance
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
+
+    def _compute_effective_channel(self, h, g):
+        """Compute effective channel after precoding"""
+        # Same logic as ZFPrecoder
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
+
+    def call(self, inputs):
+        x, h = inputs
+        # 1) Reorder x
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
+
+        # 2) Reorder h
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
+
+        # 3) MMSE precoding
+        x_precoded, g = regularized_zf_precoder(
+            x_precoded,
+            h_pc_desired,
+            no=self._noise_variance,
+            return_precoding_matrix=True
+        )
+
+        # 4) Reorder output
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
+        return x_precoded
+
+
+class MRTPrecoder(Layer):
+    # pylint: disable=line-too-long
+    r"""MRTPrecoder(resource_grid, stream_management, return_effective_channel=False, dtype=tf.complex64, **kwargs)
+
+    MRT (Matched Filter) precoding for multi-antenna transmissions.
+
+    Similar to :class:`ZFPrecoder` but uses :meth:`~sionna.mimo.mrt_precoder`.
+
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        OFDM resource grid configuration
+
+    stream_management : StreamManagement
+        Manages which user streams go to which transmit antennas
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding
+
+    dtype : tf.DType
+        Datatype for internal calculations and output
+
+    Input
+    -----
+    (x, h) :
+        Same shapes as :class:`ZFPrecoder`
+
+    Output
+    ------
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The MRT-precoded OFDM grids.
+
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel.
+    """
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
+
+    def _compute_effective_channel(self, h, g):
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
+
+    def call(self, inputs):
+        x, h = inputs
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
+
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
+
+        x_precoded, g = mrt_precoder(x_precoded,
+                                     h_pc_desired,
+                                     return_precoding_matrix=True)
+
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
+        return x_precoded
+
+

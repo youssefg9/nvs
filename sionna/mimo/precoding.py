@@ -2,287 +2,578 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-"""Classes and functions related to MIMO transmit precoding"""
+"""Class definitions and functions related to OFDM transmit precoding.
+
+Extended to include:
+- MMSE (Regularized ZF) Precoding
+- MRT Precoding
+- C2PO Precoding
+- C3PO Precoding
+"""
 
 import tensorflow as tf
-from sionna.utils import matrix_inv
-from sionna import PI
-import math
+from tensorflow.keras.layers import Layer
+import sionna
+from sionna.utils import flatten_dims
+from sionna.mimo import zero_forcing_precoder,regularized_zf_precoder,mrt_precoder,c2po_precoder,c3po_precoder
+from sionna.ofdm import RemoveNulledSubcarriers
 
-def zero_forcing_precoder(x, h, return_precoding_matrix=False):
+
+class ZFPrecoder(Layer):
     # pylint: disable=line-too-long
-    r"""Zero-Forcing (ZF) Precoder
+    r"""ZFPrecoder(resource_grid, stream_management, return_effective_channel=False, dtype=tf.complex64, **kwargs)
 
-    This function implements ZF precoding for a MIMO link, assuming the
-    following model:
+    Zero-forcing precoding for multi-antenna transmissions.
 
-    .. math::
+    This layer precodes a tensor containing OFDM resource grids using
+    the :meth:`~sionna.mimo.zero_forcing_precoder`. For every
+    transmitter, the channels to all intended receivers are gathered
+    into a channel matrix, based on the which the precoding matrix
+    is computed and the input tensor is precoded. The layer also outputs
+    optionally the effective channel after precoding for each stream.
 
-        \mathbf{y} = \mathbf{H}\mathbf{G}\mathbf{x} + \mathbf{n}
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        An instance of :class:`~sionna.ofdm.ResourceGrid`.
 
-    where :math:`\mathbf{y}\in\mathbb{C}^K` is the received signal vector,
-    :math:`\mathbf{H}\in\mathbb{C}^{K\times M}` is the known channel matrix,
-    :math:`\mathbf{G}\in\mathbb{C}^{M\times K}` is the precoding matrix,
-    :math:`\mathbf{x}\in\mathbb{C}^K` is the symbol vector to be precoded,
-    and :math:`\mathbf{n}\in\mathbb{C}^K` is a noise vector. It is assumed that
-    :math:`K\le M`.
+    stream_management : StreamManagement
+        An instance of :class:`~sionna.mimo.StreamManagement`.
 
-    The precoding matrix :math:`\mathbf{G}` is defined as (Eq. 4.37) [BHS2017]_ :
+    return_effective_channel : bool
+        Indicates if the effective channel after precoding should be returned.
 
-    .. math::
-
-        \mathbf{G} = \mathbf{V}\mathbf{D}
-
-    where
-
-    .. math::
-
-        \mathbf{V} &= \mathbf{H}^{\mathsf{H}}\left(\mathbf{H} \mathbf{H}^{\mathsf{H}}\right)^{-1}\\
-        \mathbf{D} &= \mathop{\text{diag}}\left( \lVert \mathbf{v}_{k} \rVert_2^{-1}, k=0,\dots,K-1 \right).
-
-    This ensures that each stream is precoded with a unit-norm vector,
-    i.e., :math:`\mathop{\text{tr}}\left(\mathbf{G}\mathbf{G}^{\mathsf{H}}\right)=K`.
-    The function returns the precoded vector :math:`\mathbf{G}\mathbf{x}`.
+    dtype : tf.Dtype
+        Datatype for internal calculations and the output dtype.
+        Defaults to `tf.complex64`.
 
     Input
     -----
-    x : [...,K], tf.complex
-        1+D tensor containing the symbol vectors to be precoded.
+    (x, h) :
+        Tuple:
 
-    h : [...,K,M], tf.complex
-        2+D tensor containing the channel matrices
+    x : [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size], tf.complex
+        Tensor containing the resource grid to be precoded.
 
-    return_precoding_matrices : bool
-        Indicates if the precoding matrices should be returned or not.
-        Defaults to False.
+    h : [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm, fft_size], tf.complex
+        Tensor containing the channel knowledge based on which the precoding
+        is computed.
 
     Output
-    -------
-    x_precoded : [...,M], tf.complex
-        Tensor of the same shape and dtype as ``x`` apart from the last
-        dimensions that has changed from `K` to `M`. It contains the
-        precoded symbol vectors.
+    ------
+    x_precoded : [batch_size, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The precoded resource grids.
 
-    g : [...,M,K], tf.complex
-        2+D tensor containing the precoding matrices. It is only returned
-        if ``return_precoding_matrices=True``.
+    h_eff : [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        Only returned if ``return_effective_channel=True``.
+        The effectice channels for all streams after precoding. Can be used to
+        simulate perfect channel state information (CSI) at the receivers.
+        Nulled subcarriers are automatically removed to be compliant with the
+        behavior of a channel estimator.
 
     Note
     ----
-    If you want to use this function in Graph mode with XLA, i.e., within
+    If you want to use this layer in Graph mode with XLA, i.e., within
     a function that is decorated with ``@tf.function(jit_compile=True)``,
     you must set ``sionna.Config.xla_compat=true``.
     See :py:attr:`~sionna.Config.xla_compat`.
     """
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    # Compute pseudo inverse for precoding
-    g = tf.matmul(h, h, adjoint_b=True)
-    g = tf.matmul(h, matrix_inv(g), adjoint_a=True)
+    def _compute_effective_channel(self, h, g):
+        """Compute effective channel after precoding"""
 
-    # Normalize each column to unit power
-    norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
-    g = g/tf.cast(norm, g.dtype)
+        # Input dimensions:
+        # h: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant,...
+        #     ..., num_ofdm, fft_size]
+        # g: [batch_size, num_tx, num_ofdm_symbols, fft_size, num_tx_ant,
+        #     ..., num_streams_per_tx]
 
-    # Expand last dim of `x` for precoding
-    x_precoded = tf.expand_dims(x, -1)
+        # Transpose h to shape:
+        # [batch_size, num_rx, num_tx, num_ofdm, fft_size, num_rx_ant,...
+        #  ..., num_tx_ant]
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
 
-    # Precode
-    x_precoded = tf.squeeze(tf.matmul(g, x_precoded), -1)
+        # Add one dummy dimension to g to be broadcastable to h:
+        # [batch_size, 1, num_tx, num_ofdm_symbols, fft_size, num_tx_ant,...
+        #  ..., num_streams_per_tx]
+        g = tf.expand_dims(g, 1)
 
-    if return_precoding_matrix:
-        return (x_precoded, g)
-    else:
+        # Compute post precoding channel:
+        # [batch_size, num_rx, num_tx, num_ofdm, fft_size, num_rx_ant,...
+        #  ..., num_streams_per_tx]
+        h_eff = tf.matmul(h, g)
+
+        # Permute dimensions to common format of channel tensors:
+        # [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx,...
+        #  ..., num_ofdm, fft_size]
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+
+        # Remove nulled subcarriers:
+        # [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx,...
+        #  ..., num_ofdm, num_effective_subcarriers]
+        h_eff = self._remove_nulled_scs(h_eff)
+
+        return h_eff
+
+    def call(self, inputs):
+
+        x, h = inputs
+        # x has shape
+        # [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
+        #
+        # h has shape
+        # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm,...
+        # ..., fft_size]
+
+        ###
+        ### Transformations to bring h and x in the desired shapes
+        ###
+
+        # Transpose x:
+        #[batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
+
+        # Transpose h:
+        # [num_tx, num_rx, num_rx_ant, num_tx_ant, num_ofdm_symbols,...
+        #  ..., fft_size, batch_size]
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+
+        # Gather desired channel for precoding:
+        # [num_tx, num_rx_per_tx, num_rx_ant, num_tx_ant, num_ofdm_symbols,...
+        #  ..., fft_size, batch_size]
+        h_pc_desired = tf.gather(h_pc, self._stream_management.precoding_ind,
+                                 axis=1, batch_dims=1)
+
+        # Flatten dims 2,3:
+        # [num_tx, num_rx_per_tx * num_rx_ant, num_tx_ant, num_ofdm_symbols,...
+        #  ..., fft_size, batch_size]
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+
+        # Transpose:
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size,...
+        #  ..., num_streams_per_tx, num_tx_ant]
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
+
+        ###
+        ### ZF precoding
+        ###
+        x_precoded, g = zero_forcing_precoder(x_precoded,
+                                              h_pc_desired,
+                                              return_precoding_matrix=True)
+
+        # Transpose output to desired shape:
+        #[batch_size, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return (x_precoded, h_eff)
+        else:
+            return x_precoded
+
+
+class MMSEPrecoder(Layer):
+    # pylint: disable=line-too-long
+    r"""MMSEPrecoder(resource_grid, stream_management, noise_variance=1e-3, return_effective_channel=False, dtype=tf.complex64, **kwargs)
+
+    Regularized ZF (MMSE) precoding for multi-antenna transmissions.
+
+    Similar to :class:`ZFPrecoder` but uses :meth:`~sionna.mimo.regularized_zf_precoder`.
+
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        The OFDM resource grid configuration.
+
+    stream_management : StreamManagement
+        Manages which user streams go to which transmit antennas.
+
+    noise_variance : float
+        Noise variance for regularization.
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding.
+
+    dtype : tf.DType
+        Datatype for internal calculations and output.
+
+    Input
+    -----
+    (x, h) :
+        Same as :class:`ZFPrecoder`.
+
+    Output
+    ------
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The precoded OFDM grids.
+
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel after precoding.
+    """
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 noise_variance=1e-3,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._noise_variance = noise_variance
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
+
+    def _compute_effective_channel(self, h, g):
+        """Compute effective channel after precoding"""
+        # Same logic as ZFPrecoder
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
+
+    def call(self, inputs):
+        x, h = inputs
+        # 1) Reorder x
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
+
+        # 2) Reorder h
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
+
+        # 3) MMSE precoding
+        x_precoded, g = regularized_zf_precoder(
+            x_precoded,
+            h_pc_desired,
+            no=self._noise_variance,
+            return_precoding_matrix=True
+        )
+
+        # 4) Reorder output
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
         return x_precoded
 
-def grid_of_beams_dft_ula(num_ant,
-                          oversmpl=1):
-    # pylint: disable=line-too-long
-    r""" Computes the Discrete Fourier Transform (DFT) Grid of Beam (GoB)
-    coefficients for a uniform linear array (ULA)
-    
-    The coefficient applied to antenna :math:`n` for beam :math:`m` is expressed
-    as:
-    
-    .. math:: 
-        c_n^m = e^{\frac{2\pi n m}{N O}}, \quad n=0,\dots,N-1, \ m=0,\dots,NO
-    
-    where :math:`N` is the number of antennas ``num_ant`` and :math:`O` is the oversampling
-    factor ``oversmpl``. 
 
-    Note that the main lobe of beam :math:`m` points in the azimuth direction 
-    :math:`\theta = \mathrm{arc sin} \left( 2\frac{m}{N} \right)` if :math:`m\le
-    N/2` and :math:`\theta = \mathrm{arc sin} \left( 2\frac{m-N}{N} \right)` if
-    :math:`m\ge N/2`, where :math:`\theta=0` defines the perpendicular to the
-    antenna array. 
+class MRTPrecoder(Layer):
+    # pylint: disable=line-too-long
+    r"""MRTPrecoder(resource_grid, stream_management, return_effective_channel=False, dtype=tf.complex64, **kwargs)
+
+    MRT (Matched Filter) precoding for multi-antenna transmissions.
+
+    Similar to :class:`ZFPrecoder` but uses :meth:`~sionna.mimo.mrt_precoder`.
+
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        OFDM resource grid configuration
+
+    stream_management : StreamManagement
+        Manages which user streams go to which transmit antennas
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding
+
+    dtype : tf.DType
+        Datatype for internal calculations and output
 
     Input
-    ------
-    num_ant : int
-        Number of antennas
-
-    oversmpl : int
-        Oversampling factor
+    -----
+    (x, h) :
+        Same shapes as :class:`ZFPrecoder`
 
     Output
-    -------
-    gob : [num_ant x oversmpl, num_ant], tf.complex
-        The :math:`m`-th row contains the `num_ant` antenna coefficients for
-        the :math:`m`-th DFT beam
+    ------
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The MRT-precoded OFDM grids.
+
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel.
     """
-    oversmpl = int(oversmpl)
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    # Beam indices: [0, .., num_ant * oversmpl - 1]
-    beam_ind = tf.range(num_ant * oversmpl, dtype=tf.float32)[:, tf.newaxis]
+    def _compute_effective_channel(self, h, g):
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
 
-    # Antenna indices: [0, .., num_ant - 1]
-    antenna_ind = tf.range(num_ant, dtype=tf.float32)[tf.newaxis, :]
+    def call(self, inputs):
+        x, h = inputs
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
 
-    # Combine real and imaginary part and normalize power to 1
-    phases = 2 * PI * beam_ind * antenna_ind / (num_ant * oversmpl)
-    gob = tf.complex(tf.cos(phases), tf.sin(phases)) / math.sqrt(num_ant)
-    return gob
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
 
-def grid_of_beams_dft(num_ant_v,
-                      num_ant_h,
-                      oversmpl_v=1,
-                      oversmpl_h=1):
+        x_precoded, g = mrt_precoder(x_precoded,
+                                     h_pc_desired,
+                                     return_precoding_matrix=True)
+
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
+        return x_precoded
+
+
+class C2POPrecoder(Layer):
     # pylint: disable=line-too-long
-    r""" Computes the Discrete Fourier Transform (DFT) Grid of Beam (GoB)
-    coefficients for a uniform rectangular array (URA)
+    r"""C2POPrecoder(resource_grid, stream_management, iterations=5, tau=1e-3, rho=1.0, return_effective_channel=False, dtype=tf.complex64, **kwargs)
 
-    GoB indices are arranged over a 2D grid indexed by :math:`(m_v,m_h)`. 
-    The coefficient of the beam with index :math:`(m_v,m_h)` applied to the
-    antenna located at row :math:`n_v` and column :math:`n_h` of the rectangular
-    array is expressed as:
-    
-    .. math:: 
-        c_{n_v,n_h}^{m_v,m_h} = e^{\frac{2\pi n_h m_v}{N_h O_h}} e^{\frac{2\pi n_h m_h}{N_v O_v}}
-    
-    where :math:`n_v=0,\dots,N_v-1`, :math:`n_h=0,\dots,N_h-1`,
-    :math:`m_v=0,\dots,N_v O_v`, :math:`m_h=0,\dots,N_h O_h`, :math:`N` is the
-    number of antennas ``num_ant`` and :math:`O_v,O_h` are the oversampling
-    factor ``oversmpl_v``, ``oversmpl_h`` in the vertical and
-    horizontal direction, respectively. 
+    1-bit iterative precoding for multi-antenna transmissions using C2PO.
 
-    We can rewrite more concisely the matrix coefficients
-    :math:`c^{m_v,m_h}` as follows:
+    Similar to :class:`ZFPrecoder` but uses :meth:`~sionna.mimo.c2po_precoder`,
+    which employs an iterative phase-projection algorithm.  
+    This often applies to **low-resolution** digital beamforming.
 
-    .. math::
-        c^{m_v,m_h} = c^{m_v} \otimes c^{m_h}
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        OFDM resource grid configuration
 
-    where :math:`\otimes` denotes the Kronecker product and
-    :math:`c^{m_v},c^{m_h}` are the ULA DFT beams computed as in
-    :func:`~sionna.mimo.grid_of_beams_dft_ula` .
+    stream_management : StreamManagement
+        Manages which user streams map to which antennas
 
-    Such a DFT GoB is, e.g., defined in Section 5.2.2.2.1 [3GPP38214]_.
+    iterations : int
+        Number of C2PO iterations
+
+    tau : float
+        Step size for approximate inverse
+
+    rho : float
+        "Push factor" scaling after each iteration
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding
+
+    dtype : tf.DType
+        Datatype for internal calculations and output
 
     Input
-    ------
-    num_ant_v : int
-        Number of antenna rows (i.e., in vertical direction) of the rectangular
-        array
-
-    num_ant_h : int
-        Number of antenna columns (i.e., in horizontal direction) of the
-        rectangular array.
-
-    oversmpl_v : int
-        Oversampling factor in vertical direction
-
-    oversmpl_h : int
-        Oversampling factor in horizontal direction
+    -----
+    (x, h) :
+        Same shapes as :class:`ZFPrecoder`
 
     Output
-    -------
-    gob : [num_ant_v x oversmpl_v, num_ant_h x oversmpl_h, num_ant_v x num_ant_h], tf.complex 
-        The elements :math:`[m_v,m_h,:]` contain the antenna coefficients of the
-        DFT beam with index pair :math:`(m_v,m_h)`.
+    ------
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The C2PO-precoded OFDM grids.
+
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel.
     """
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 iterations=5,
+                 tau=1e-3,
+                 rho=1.0,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._iterations = iterations
+        self._tau = tau
+        self._rho = rho
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    # Compute the DFT coefficients to be applied in the vertical direction
-    gob_v = grid_of_beams_dft_ula(num_ant_v, oversmpl=oversmpl_v)
-    gob_v = gob_v[:, tf.newaxis, :, tf.newaxis]
+    def _compute_effective_channel(self, h, g):
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
 
-    # Compute the DFT coefficients to be applied in the horizontal direction
-    gob_h = grid_of_beams_dft_ula(num_ant_h, oversmpl=oversmpl_h)
-    gob_h = gob_h[tf.newaxis, :, tf.newaxis, :]
+    def call(self, inputs):
+        x, h = inputs
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
 
-    # Kronecker product:
-    # [num_ant_v * oversmpl_v , num_ant_h * oversmpl_v, num_ant_v, num_ant_h]
-    coef_vh = tf.math.multiply(gob_h, gob_v)
-    # Flatten the last two dimensions to produce 1-dimensional precoding vectors
-    # [num_ant_v * oversmpl_v , num_ant_h * oversmpl_v, num_ant_v x num_ant_h]
-    coef_vh = flatten_precoding_mat(coef_vh)
-    return coef_vh
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
 
-def flatten_precoding_mat(precoding_mat, by_column=True):
+        x_precoded, g = c2po_precoder(
+            x_precoded,
+            h_pc_desired,
+            iterations=self._iterations,
+            tau=self._tau,
+            rho=self._rho,
+            return_precoding_matrix=True
+        )
+
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
+        return x_precoded
+
+
+class C3POPrecoder(Layer):
     # pylint: disable=line-too-long
-    r"""Flattens a [..., num_ant_v, num_ant_h] precoding matrix associated with
-    a rectangular array by producing a [..., num_ant_v x num_ant_h] precoding vector.
+    r"""C3POPrecoder(resource_grid, stream_management, iterations=5, tau=1e-3, rho=1.0, return_effective_channel=False, dtype=tf.complex64, **kwargs)
+
+    3-bit iterative precoding for multi-antenna transmissions using C3PO.
+
+    Similar to :class:`C2POPrecoder` but uses :meth:`~sionna.mimo.c3po_precoder`,
+    which quantizes phase to 3-bit resolution (8 levels). This can also be
+    extended to amplitude-phase quantization if desired.
+
+    Parameters
+    ----------
+    resource_grid : ResourceGrid
+        OFDM resource grid
+
+    stream_management : StreamManagement
+        Mapping of user streams
+
+    iterations : int
+        Number of iterative updates
+
+    tau : float
+        Step size for approximate inverse
+
+    rho : float
+        "Push factor" after each iteration
+
+    return_effective_channel : bool
+        If `True`, returns the effective channel after precoding
+
+    dtype : tf.DType
+        Datatype for internal ops
 
     Input
-    ------
-    precoding_mat : [..., num_antennas_vertical, num_antennas_horizontal], tf.complex 
-        Precoding matrix. The element :math:`(i,j)` contains the precoding
-        coefficient of the antenna element located at row :math:`i` and column
-        :math:`j` of a rectangular antenna array.
-
-    by_column : bool
-        If `True`, then flattening occurs on a per-column basis, i.e., the first
-        column is appended to the second, and so on. Else, flattening is performed on
-        a per-row basis.
+    -----
+    (x, h) :
+        Identical shapes as :class:`ZFPrecoder`
 
     Output
-    -------
-    : [..., num_antennas_vertical x num_antennas_horizontal], tf.complex 
-        Flattened precoding vector
-    """
-
-    # Transpose the last two dimensions
-    if by_column:
-        precoding_mat = tf.linalg.matrix_transpose(precoding_mat)
-    # Flatten the last two dimensions
-    precoding_vec = tf.reshape(
-        precoding_mat, precoding_mat.shape[:-2] + [math.prod(precoding_mat.shape[2:])])
-    return precoding_vec
-
-def normalize_precoding_power(precoding_vec, dtype=None, tx_power_list=None):
-    # pylint: disable=line-too-long
-    r""" Normalizes the beam coefficient power to 1 by default, or to
-    ``tx_power_list`` if provided as input.
-
-    Input
     ------
-    precoding_vec : [N,M], tf.complex
-        Each row contains a set of antenna coefficients whose power is to be normalized.
+    x_precoded : [batch, num_tx, num_tx_ant, num_ofdm_symbols, fft_size], tf.complex
+        The 3-bit quantized precoded grids.
 
-    dtype : dtype
-        dtype of the output. Defaults to None.
-
-    tx_power_list : [N], float
-        The :math:`i`-th element defines the power of the :math:`i`-th precoding vector.
-
-    Output
-    -------
-     : [N,M] tf.complex
-        Normalized antenna coefficients.
+    h_eff : [batch, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm, num_effective_subcarriers], tf.complex
+        (Optional) Effective channel.
     """
-    if dtype is None:
-        dtype = precoding_vec.dtype
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 iterations=5,
+                 tau=1e-3,
+                 rho=1.0,
+                 return_effective_channel=False,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._iterations = iterations
+        self._tau = tau
+        self._rho = rho
+        self._return_effective_channel = return_effective_channel
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    if len(precoding_vec.shape)==1:
-        precoding_vec = precoding_vec[tf.newaxis, :]
+    def _compute_effective_channel(self, h, g):
+        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        h = tf.cast(h, g.dtype)
+        g = tf.expand_dims(g, 1)
+        h_eff = tf.matmul(h, g)
+        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
+        h_eff = self._remove_nulled_scs(h_eff)
+        return h_eff
 
-    if tx_power_list is None:
-        # By default, power is normalized to 1
-        tx_power_list = [1] * precoding_vec.shape[0]
+    def call(self, inputs):
+        x, h = inputs
+        x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
+        x_precoded = tf.cast(x_precoded, self._dtype)
 
-    precoding_vec_norm = tf.cast(tf.norm(precoding_vec, axis=1), dtype)[
-        :, tf.newaxis]
-    tx_power = tf.constant(tx_power_list, dtype=dtype)[:, tf.newaxis]
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.gather(h_pc,
+                                 self._stream_management.precoding_ind,
+                                 axis=1,
+                                 batch_dims=1)
+        h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
 
-    # Normalize the power of each row
-    precoding_vec = tf.math.multiply(tf.math.divide(
-        precoding_vec, precoding_vec_norm), tx_power)
+        x_precoded, g = c3po_precoder(
+            x_precoded,
+            h_pc_desired,
+            iterations=self._iterations,
+            tau=self._tau,
+            rho=self._rho,
+            return_precoding_matrix=True
+        )
 
-    return precoding_vec
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        if self._return_effective_channel:
+            h_eff = self._compute_effective_channel(h, g)
+            return x_precoded, h_eff
+        return x_precoded
